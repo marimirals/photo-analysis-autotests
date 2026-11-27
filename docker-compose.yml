@@ -1,0 +1,134 @@
+# Тестовый стенд: весь photo-analysis в контейнерах, чистый при каждом запуске.
+#   docker compose up -d --build     — поднять (первая сборка analyzer'а ~5 мин)
+#   docker compose down -v           — остановить и стереть данные
+# Код сервиса берётся из соседней папки (../photo-analysis) или из PHOTO_ANALYSIS_DIR.
+# Наружу открыты только api (18080) и Postgres (15433) — порты не пересекаются
+# с обычным docker-compose photo-analysis, оба стенда могут работать одновременно.
+name: photo-analysis-autotests
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://photo:photo@postgres:5432/photo?sslmode=disable
+  S3_ENDPOINT: seaweedfs:8333
+  S3_ACCESS_KEY: photo
+  S3_SECRET_KEY: photo12345
+  S3_BUCKET: photos
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_TOPIC_UPLOADED: photos.uploaded
+  KAFKA_TOPIC_FAILED: photos.failed
+
+services:
+  # ---------- инфраструктура ----------
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: photo
+      POSTGRES_PASSWORD: photo
+      POSTGRES_DB: photo
+    ports:
+      - "15433:5432"          # для SQL-проверок из тестов
+    tmpfs:
+      - /var/lib/postgresql/data   # данные в памяти: каждый запуск с чистой базой
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U photo -d photo"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    command: >
+      server -dir=/data -ip=seaweedfs -ip.bind=0.0.0.0
+      -master.volumeSizeLimitMB=1024 -volume.max=0
+      -filer -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - ${PHOTO_ANALYSIS_DIR:-../photo-analysis}/deploy/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8333"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+
+  kafka:
+    image: apache/kafka:4.1.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+
+  kafka-init:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic photos.uploaded --partitions 3 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic photos.failed --partitions 1 --replication-factor 1
+    restart: "no"
+
+  # ---------- сервис ----------
+  api:
+    image: photo-api:dev       # если образ уже собран (например, для kind) — возьмётся он
+    build:
+      context: ${PHOTO_ANALYSIS_DIR:-../photo-analysis}
+      dockerfile: deploy/docker/go.Dockerfile
+      args: { SERVICE: api }
+    environment:
+      <<: *app-env
+    ports:
+      - "18080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      seaweedfs: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
+    restart: on-failure
+
+  worker:
+    image: photo-worker:dev
+    build:
+      context: ${PHOTO_ANALYSIS_DIR:-../photo-analysis}
+      dockerfile: deploy/docker/go.Dockerfile
+      args: { SERVICE: worker }
+    environment:
+      <<: *app-env
+      ANALYZER_ADDR: analyzer:50051
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      api: { condition: service_started }
+      analyzer: { condition: service_started }
+    restart: on-failure
+
+  analyzer:
+    image: photo-analyzer:dev
+    build:
+      context: ${PHOTO_ANALYSIS_DIR:-../photo-analysis}
+      dockerfile: deploy/docker/analyzer.Dockerfile
+    environment:
+      S3_ENDPOINT: seaweedfs:8333
+      S3_ACCESS_KEY: photo
+      S3_SECRET_KEY: photo12345
+      ANALYZER_WORKERS: "2"
+    depends_on:
+      seaweedfs: { condition: service_healthy }
+    mem_limit: 1g
+    restart: on-failure

@@ -1,6 +1,7 @@
 """Общие фикстуры. pytest находит этот файл сам и даёт фикстуры всем тестам в папке."""
 from __future__ import annotations
 
+import time
 import uuid
 
 import allure
@@ -13,14 +14,33 @@ from framework.api_client import PhotoApi
 
 @pytest.fixture(scope="session", autouse=True)
 def service_is_up():
-    """Один раз перед всеми тестами: если сервис не отвечает, нет смысла гонять сотню тестов."""
-    try:
-        r = requests.get(f"{config.BASE_URL}/healthz", timeout=5)
-        ok = r.status_code == 200
-    except requests.RequestException as e:
-        ok, r = False, e
-    if not ok:
-        pytest.exit(f"Сервис {config.BASE_URL} недоступен ({r}). Запусти photo-analysis.", returncode=3)
+    """Один раз перед всеми тестами ждём, пока сервис будет готов (/readyz = 200).
+    Только что поднятому стенду нужно время: миграции, подключение к Kafka и S3.
+    Не дождались — останавливаем прогон: нет смысла гонять сотню тестов против мёртвого сервиса."""
+    deadline = time.monotonic() + config.STARTUP_TIMEOUT
+    last = "нет ответа"
+    while time.monotonic() < deadline:
+        try:
+            r = requests.get(f"{config.BASE_URL}/readyz", timeout=5)
+            if r.status_code == 200:
+                return
+            last = f"{r.status_code} {r.text[:200]}"
+        except requests.RequestException as e:
+            last = e.__class__.__name__
+        time.sleep(2)
+    pytest.exit(f"Сервис {config.BASE_URL} не готов за {config.STARTUP_TIMEOUT:.0f} с ({last}). "
+                f"Запусти photo-analysis или тестовый стенд: docker compose up -d", returncode=3)
+
+
+def pytest_collection_modifyitems(items):
+    """Заголовок теста в Allure — первая строка docstring («UPL-01: ...»).
+    Задаётся при сборе тестов: заголовок из фикстуры allure-pytest перезаписывает своим."""
+    for item in items:
+        fn = getattr(item, "function", None)
+        doc = fn.__doc__ if fn else None
+        if doc and not hasattr(fn, "__allure_display_name__"):
+            title = doc.strip().splitlines()[0]
+            fn.__allure_display_name__ = title.replace("{", "{{").replace("}", "}}")
 
 
 FEATURES = {
@@ -35,11 +55,7 @@ FEATURES = {
 
 @pytest.fixture(autouse=True)
 def allure_labels(request):
-    """Оформление отчёта: заголовок теста — первая строка docstring («UPL-01: ...»),
-    раздел — по файлу, смоук-тесты — критичные."""
-    doc = request.node.function.__doc__
-    if doc:
-        allure.dynamic.title(doc.strip().splitlines()[0])
+    """Оформление отчёта: раздел — по файлу, смоук-тесты — критичные."""
     feature = FEATURES.get(request.node.module.__name__.split(".")[-1])
     if feature:
         allure.dynamic.feature(feature)
