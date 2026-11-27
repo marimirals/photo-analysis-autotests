@@ -1,0 +1,117 @@
+name: API autotests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:            # кнопка «Run workflow» во вкладке Actions
+  schedule:
+    - cron: "0 4 * * *"         # каждый день в 07:00 по Москве — ночная регрессия
+
+concurrency:                    # новый запуск на той же ветке отменяет старый
+  group: autotests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PHOTO_ANALYSIS_DIR: ./photo-analysis
+      BASE_URL: http://localhost:18080
+      DB_DSN: postgresql://photo:photo@localhost:15433/photo
+
+    steps:
+      - name: Checkout autotests
+        uses: actions/checkout@v4
+
+      - name: Checkout service (photo-analysis)
+        uses: actions/checkout@v4
+        with:
+          repository: marimirals/photo-analysis
+          path: photo-analysis
+
+      - name: Set up Go (for go mod vendor)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: photo-analysis/go.mod
+          cache-dependency-path: photo-analysis/go.sum
+
+      - name: Vendor Go dependencies of the service
+        working-directory: photo-analysis
+        run: go mod vendor
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build and start test stand
+        run: docker compose up -d --build
+
+      - name: Smoke tests
+        run: pytest -m smoke
+
+      - name: All tests
+        run: pytest
+
+      - name: Collect service logs
+        if: always()
+        run: |
+          docker compose ps
+          docker compose logs --no-color > stand-logs.txt
+
+      - name: Set up Node.js (for Allure 3)
+        if: always()
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate Allure report
+        if: always()
+        run: npx --yes allure generate ./allure-results --clean
+
+      - name: Upload Allure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report
+          retention-days: 14
+
+      - name: Upload service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stand-logs
+          path: stand-logs.txt
+          retention-days: 14
+
+      - name: Prepare report for GitHub Pages
+        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: allure-report
+
+      - name: Stop test stand
+        if: always()
+        run: docker compose down -v
+
+  publish-report:
+    needs: tests
+    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publish Allure report to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
