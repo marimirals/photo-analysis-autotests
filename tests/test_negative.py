@@ -4,6 +4,8 @@ import pytest
 from framework import images
 from framework.api_client import API, PhotoApi
 
+import allure
+
 MAX_UPLOAD = 20 * 1024 * 1024          # лимит сервиса: 20 МБ (MAX_UPLOAD_MB=20)
 MISSING_ID = "00000000-0000-4000-8000-000000000000"
 
@@ -144,6 +146,10 @@ def test_list_invalid_filters(api, params, text):
     pytest.param({"limit": "abc"}, id="limit-abc"),
     pytest.param({"offset": -1}, id="offset-negative"),
 ])
+@allure.issue("https://github.com/marimirals/photo-analysis/issues/1", "photo-analysis#1")
+@pytest.mark.xfail(strict=True, reason=(
+    "photo-analysis#1: расхождение с документацией — в OpenAPI limit 1..100 и offset ≥ 0, "
+    "а сервис молча подменяет неверные значения (0 → 1, abc → 20, -1 → 0) вместо 400"))
 def test_list_invalid_pagination(api, params):
     """LST-04: limit/offset вне допустимого диапазона по документации — ожидаем 400."""
     assert_error(api.list_photos(**params), 400)
