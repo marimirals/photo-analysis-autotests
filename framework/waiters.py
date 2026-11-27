@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from typing import Callable, TypeVar
 
 from framework import config
 from framework.api_client import PhotoApi
@@ -24,3 +25,18 @@ def wait_for_analysis(api: PhotoApi, photo_id: str,
         time.sleep(interval)
     status = last.json().get("status") if last is not None else "нет ответа"
     raise TimeoutError(f"анализ фото {photo_id} не готов за {timeout:.0f} с (последний статус: {status})")
+
+
+T = TypeVar("T")
+
+
+def wait_until(check: Callable[[], T], what: str, timeout: float = 15,
+               interval: float = config.POLL_INTERVAL) -> T:
+    """Общий вариант: вызывает check(), пока он не вернёт что-то истинное, и возвращает это."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = check()
+        if result:
+            return result
+        time.sleep(interval)
+    raise TimeoutError(f"не дождались за {timeout:.0f} с: {what}")
