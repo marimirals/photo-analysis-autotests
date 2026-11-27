@@ -5,15 +5,6 @@ from framework import images
 from framework.api_client import PhotoApi
 
 
-def upload_ok(api: PhotoApi, content: bytes, name: str = "photo.jpg",
-              mime: str = "image/jpeg") -> dict:
-    """Вспомогательная функция, не тест (имя не начинается с test_).
-    Загружает фото и сразу проверяет, что загрузка прошла."""
-    r = api.upload(content, name, mime)
-    assert r.status_code == 202, f"загрузка {name} вернула {r.status_code}: {r.text}"
-    return r.json()
-
-
 @pytest.mark.parametrize("fmt, mime, name", [
     pytest.param("JPEG", "image/jpeg", "photo.jpg", id="jpeg"),
     pytest.param("PNG", "image/png", "photo.png", id="png"),
@@ -45,7 +36,7 @@ def test_get_uploaded_photo(api, uploaded_photo):
 def test_download_returns_same_bytes(api):
     """FIL-01: скачанный файл побайтно совпадает с загруженным."""
     content = images.sharp(seed=5)
-    photo = upload_ok(api, content, "original.jpg")
+    photo = api.upload_ok(content, "original.jpg")
     r = api.get_file(photo["id"])
     assert r.status_code == 200
     assert r.headers["Content-Type"] == "image/jpeg"
@@ -54,8 +45,8 @@ def test_download_returns_same_bytes(api):
 
 def test_list_contains_only_own_photos(api, other_api):
     """LST-01: в списке только свои фото, total верный."""
-    mine = {upload_ok(api, images.sharp(seed=s))["id"] for s in (1, 2, 3)}
-    upload_ok(other_api, images.sharp(seed=4))          # чужое фото
+    mine = {api.upload_ok(images.sharp(seed=s))["id"] for s in (1, 2, 3)}
+    other_api.upload_ok(images.sharp(seed=4))          # чужое фото
 
     r = api.list_photos()
     assert r.status_code == 200, r.text
@@ -66,7 +57,7 @@ def test_list_contains_only_own_photos(api, other_api):
 
 def test_list_pagination(api):
     """LST-02: limit/offset делят список на страницы, новые фото первыми."""
-    ids = [upload_ok(api, images.sharp(seed=s))["id"] for s in range(5)]
+    ids = [api.upload_ok(images.sharp(seed=s))["id"] for s in range(5)]
     newest_first = ids[::-1]
 
     pages = [api.list_photos(limit=2, offset=off).json() for off in (0, 2, 4)]

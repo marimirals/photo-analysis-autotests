@@ -46,6 +46,13 @@ class PhotoApi:
             self.created.append(r.json()["id"])
         return r
 
+    def upload_ok(self, content: bytes, filename: str = "photo.jpg",
+                  content_type: str = "image/jpeg") -> dict:
+        """Загрузка как предусловие теста: сразу проверяет, что прошла, и отдаёт фото."""
+        r = self.upload(content, filename, content_type)
+        assert r.status_code == 202, f"загрузка {filename} вернула {r.status_code}: {r.text}"
+        return r.json()
+
     def get_photo(self, photo_id: str, **kwargs) -> requests.Response:
         return self.request("GET", f"{API}/photos/{photo_id}", **kwargs)
 

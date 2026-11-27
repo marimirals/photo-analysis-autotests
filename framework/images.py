@@ -12,10 +12,10 @@ import random
 from PIL import Image, ImageDraw, ImageFilter
 
 
-def _scene(width: int, height: int, seed: int, dark: bool = False) -> Image.Image:
+def _scene(width: int, height: int, seed: int) -> Image.Image:
     """Резкая «сцена» из случайных прямоугольников, кругов и линий."""
     rnd = random.Random(seed)
-    lo, hi = (0, 45) if dark else (0, 255)
+    lo, hi = 0, 255
     img = Image.new("RGB", (width, height), tuple(rnd.randint(lo, hi) for _ in range(3)))
     draw = ImageDraw.Draw(img)
     for _ in range(120):
@@ -51,8 +51,18 @@ def blurred(width: int = 800, height: int = 600, seed: int = 1) -> bytes:
 
 
 def dark(width: int = 800, height: int = 600, seed: int = 1) -> bytes:
-    """Тёмная сцена — analyzer должен отметить is_underexposed."""
-    return encode(_scene(width, height, seed, dark=True))
+    """Тёмная, но резкая картинка: почти чёрный фон и тонкие тусклые линии.
+    analyzer должен отметить is_underexposed (яркость ~11 при пороге 40)
+    и НЕ отметить is_blurry (резкость ~1000 при пороге 50) — чтобы причины не смешивались."""
+    rnd = random.Random(seed)
+    img = Image.new("RGB", (width, height), (8, 8, 8))
+    draw = ImageDraw.Draw(img)
+    for _ in range(400):
+        x, y = rnd.randrange(width), rnd.randrange(height)
+        color = tuple(rnd.randint(0, 90) for _ in range(3))
+        draw.line((x, y, x + rnd.randint(-80, 80), y + rnd.randint(-80, 80)),
+                  fill=color, width=rnd.randint(1, 3))
+    return encode(img)
 
 
 def resized_copy(width: int = 800, height: int = 600, seed: int = 1,
