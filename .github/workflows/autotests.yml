@@ -16,6 +16,8 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      report: ${{ steps.allure.outputs.report }}
     env:
       PHOTO_ANALYSIS_DIR: ./photo-analysis
       BASE_URL: http://localhost:18080
@@ -72,11 +74,14 @@ jobs:
           node-version: 22
 
       - name: Generate Allure report
-        if: always()
-        run: npx --yes allure generate ./allure-results --clean
+        id: allure
+        if: always() && hashFiles('allure-results/*.json') != ''
+        run: |
+          npx --yes allure generate ./allure-results --clean
+          echo "report=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload Allure report
-        if: always()
+        if: always() && steps.allure.outputs.report == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: allure-report
@@ -92,7 +97,7 @@ jobs:
           retention-days: 14
 
       - name: Prepare report for GitHub Pages
-        if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: always() && steps.allure.outputs.report == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: allure-report
@@ -103,7 +108,7 @@ jobs:
 
   publish-report:
     needs: tests
-    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: always() && needs.tests.outputs.report == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pages: write
