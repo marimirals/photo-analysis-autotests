@@ -6,6 +6,10 @@ api.upload(...), api.get_photo(...). Если путь в API поменяетс
 """
 from __future__ import annotations
 
+import contextlib
+import json
+
+import allure
 import requests
 
 from framework import config
@@ -21,10 +25,25 @@ class PhotoApi:
         if user_id is not None:
             self.session.headers["X-User-ID"] = user_id
         self.created: list[str] = []   # id загруженных фото — удалим после теста
+        self._report = True             # писать ли запросы в Allure-отчёт
 
     def request(self, method: str, path: str, **kwargs) -> requests.Response:
         kwargs.setdefault("timeout", config.REQUEST_TIMEOUT)
-        return self.session.request(method, self.base_url + path, **kwargs)
+        if not self._report:
+            return self.session.request(method, self.base_url + path, **kwargs)
+        with allure.step(f"{method} {path}"):
+            r = self.session.request(method, self.base_url + path, **kwargs)
+            attach_exchange(r)
+        return r
+
+    @contextlib.contextmanager
+    def quiet(self):
+        """Временно не писать запросы в отчёт — например, при опросе /analysis каждые 0,5 с."""
+        self._report = False
+        try:
+            yield self
+        finally:
+            self._report = True
 
     # ---------- служебные ----------
     def healthz(self) -> requests.Response:
@@ -40,6 +59,7 @@ class PhotoApi:
     def upload(self, content: bytes, filename: str = "photo.jpg",
                content_type: str = "image/jpeg", field: str = "file",
                **kwargs) -> requests.Response:
+        attach_image(content, filename)
         r = self.request("POST", f"{API}/photos",
                          files={field: (filename, content, content_type)}, **kwargs)
         if r.status_code == 202:
@@ -83,3 +103,54 @@ class PhotoApi:
             except requests.RequestException:
                 pass
         self.created.clear()
+
+
+# ---------- Allure: что именно отправили и что получили ----------
+MAX_TEXT = 5000
+
+
+def _describe_body(req: requests.PreparedRequest) -> str:
+    if req.body is None:
+        return "(без тела)"
+    ctype = req.headers.get("Content-Type", "")
+    if ctype.startswith("multipart/form-data"):
+        return f"multipart/form-data, {len(req.body)} байт"
+    body = req.body.decode(errors="replace") if isinstance(req.body, bytes) else str(req.body)
+    return body[:MAX_TEXT]
+
+
+def attach_exchange(r: requests.Response) -> None:
+    req = r.request
+    headers = "\n".join(f"{k}: {v}" for k, v in req.headers.items()
+                        if k in ("X-User-ID", "Content-Type", "Accept"))
+    allure.attach(f"{req.method} {req.url}\n{headers}\n\n{_describe_body(req)}",
+                  name="запрос", attachment_type=allure.attachment_type.TEXT)
+
+    ctype = r.headers.get("Content-Type", "")
+    meta = f"{r.status_code} {r.reason}, {r.elapsed.total_seconds() * 1000:.0f} мс"
+    if "application/json" in ctype:
+        try:
+            body = json.dumps(r.json(), ensure_ascii=False, indent=2)
+        except ValueError:
+            body = r.text
+        allure.attach(body[:MAX_TEXT], name=f"ответ {meta}", attachment_type=allure.attachment_type.JSON)
+    elif ctype.startswith("image/"):
+        allure.attach(f"{len(r.content)} байт, {ctype}", name=f"ответ {meta}",
+                      attachment_type=allure.attachment_type.TEXT)
+    else:
+        allure.attach(r.text[:MAX_TEXT] or "(пустое тело)", name=f"ответ {meta}",
+                      attachment_type=allure.attachment_type.TEXT)
+
+
+def attach_image(content: bytes, filename: str) -> None:
+    """Загружаемую картинку прикладываем к отчёту — видно, что именно тестировали.
+    Большие и «не картинки» не прикладываем."""
+    if len(content) > 2 * 1024 * 1024:
+        return
+    if content[:3] == b"\xff\xd8\xff":
+        kind = allure.attachment_type.JPG
+    elif content[:8] == b"\x89PNG\r\n\x1a\n":
+        kind = allure.attachment_type.PNG
+    else:
+        return
+    allure.attach(content, name=f"картинка {filename}", attachment_type=kind)
